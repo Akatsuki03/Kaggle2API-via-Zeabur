@@ -144,11 +144,17 @@ app.post('/api/update', (req, res) => {
     if (token !== AUTH_TOKEN) return res.status(403).json({ error: 'forbidden' });
 
     if (!DEPLOY_HOOK) {
-        return res.status(400).json({ error: '未配置 ZEABUR_DEPLOY_HOOK 环境变量' });
+        // [改动点] 没配置 Hook 的情况，说明可能是绑定了 GitHub 自动部署
+        return res.json({ 
+            ok: true, 
+            status: 200, 
+            response: '已开启 GitHub 自动部署或未配置免密更新。\n如果您是通过 GitHub 绑定的 Zeabur，拉取最新代码后 Zeabur 会自动部署。' 
+        });
     }
 
+    // 后面的发送请求逻辑保持不变...
     const url = new URL(DEPLOY_HOOK);
-
+    // ...
     const reqOpt = {
         hostname: url.hostname,
         path: url.pathname + url.search,
@@ -697,11 +703,14 @@ async function checkUpdate() {
             badge.textContent = 'v' + d.remote + ' 可用';
             document.getElementById('ver-remote-wrap').style.display = '';
             document.getElementById('ver-remote').textContent = 'v' + d.remote + ' (' + d.remoteDate + ')';
-            btnUpdate.style.display = '';
-
+            
             if (!d.deployHookConfigured) {
-                msg.className = 'update-msg err';
-                msg.textContent = '⚠️ 未配置 ZEABUR_DEPLOY_HOOK 环境变量，无法自动更新。请在 Zeabur 控制台 Settings → Deploy Hook 中获取链接，添加到环境变量。';
+                // 改成蓝色提示，并把没用的更新按钮隐藏起来，因为 GitHub 会自动搞定！
+                btnUpdate.style.display = 'none';
+                msg.className = 'update-msg info';
+                msg.textContent = '💡 提示：Zeabur 正在监听 GitHub 仓库。如果是 Fork 的项目，请在 GitHub 点击 "Sync fork" 拉取最新代码，Zeabur 将会自动部署更新。';
+            } else {
+                btnUpdate.style.display = '';
             }
         } else {
             badge.className = 'badge latest';
