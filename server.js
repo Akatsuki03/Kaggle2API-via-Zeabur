@@ -1,14 +1,55 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
 const app = express();
 
 app.use(express.json());
 
 const AUTH_TOKEN = process.env.REGISTRY_TOKEN || 'your-secret-token';
+const DEPLOY_HOOK = process.env.ZEABUR_DEPLOY_HOOK || '';
+const REPO = 'Akatsuki03/Kaggle2API-via-Zeabur';
+const LOCAL_VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, 'version.json'), 'utf8'));
 
 let nodes = [];
 let roundRobin = 0;
 let globalStats = { totalRequests: 0, totalErrors: 0, startTime: Date.now() };
+let updateCache = { data: null, checkedAt: 0 };
+
+// === 工具函数 ===
+function fetchJSON(url) {
+    return new Promise((resolve, reject) => {
+        https.get(url, { headers: { 'User-Agent': 'Kaggle2API' } }, (res) => {
+            let body = '';
+            res.on('data', c => body += c);
+            res.on('end', () => {
+                try { resolve(JSON.parse(body)); }
+                catch(e) { reject(e); }
+            });
+        }).on('error', reject);
+    });
+}
+
+function fetchText(url) {
+    return new Promise((resolve, reject) => {
+        https.get(url, { headers: { 'User-Agent': 'Kaggle2API' } }, (res) => {
+            let body = '';
+            res.on('data', c => body += c);
+            res.on('end', () => resolve(body));
+        }).on('error', reject);
+    });
+}
+
+function compareVersion(a, b) {
+    const pa = a.split('.').map(Number);
+    const pb = b.split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+        if (pa[i] > pb[i]) return 1;
+        if (pa[i] < pb[i]) return -1;
+    }
+    return 0;
+}
 
 // === 注册 ===
 app.post('/register', (req, res) => {
@@ -35,7 +76,6 @@ app.post('/register', (req, res) => {
     res.json({ ok: true, total: nodes.length });
 });
 
-// === 移除 ===
 app.post('/unregister', (req, res) => {
     const { token, endpoint } = req.body;
     if (token !== AUTH_TOKEN) return res.status(403).json({ error: 'forbidden' });
@@ -43,11 +83,12 @@ app.post('/unregister', (req, res) => {
     res.json({ ok: true, total: nodes.length });
 });
 
-// === 状态 API ===
+// === 状态 ===
 app.get('/status', (req, res) => {
     const uptime = Math.floor((Date.now() - globalStats.startTime) / 1000);
     res.json({
         uptime,
+        version: LOCAL_VERSION.version,
         totalRequests: globalStats.totalRequests,
         totalErrors: globalStats.totalErrors,
         nodes: nodes.map(n => ({
@@ -60,6 +101,75 @@ app.get('/status', (req, res) => {
             lastUsed: n.lastUsed
         }))
     });
+});
+
+// === 检查更新 ===
+app.get('/api/check-update', async (req, res) => {
+    try {
+        const now = Date.now();
+        if (updateCache.data && (now - updateCache.checkedAt) < 60000) {
+            return res.json(updateCache.data);
+        }
+
+        const remoteVersion = await fetchJSON(
+            `https://raw.githubusercontent.com/${REPO}/main/gateway/version.json?t=${now}`
+        );
+
+        const changelog = await fetchText(
+            `https://raw.githubusercontent.com/${REPO}/main/CHANGELOG.md?t=${now}`
+        );
+
+        const hasUpdate = compareVersion(remoteVersion.version, LOCAL_VERSION.version) > 0;
+
+        const result = {
+            current: LOCAL_VERSION.version,
+            currentDate: LOCAL_VERSION.date,
+            remote: remoteVersion.version,
+            remoteDate: remoteVersion.date,
+            hasUpdate,
+            changelog,
+            deployHookConfigured: !!DEPLOY_HOOK
+        };
+
+        updateCache = { data: result, checkedAt: now };
+        res.json(result);
+    } catch(e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// === 触发更新 ===
+app.post('/api/update', (req, res) => {
+    const { token } = req.body;
+    if (token !== AUTH_TOKEN) return res.status(403).json({ error: 'forbidden' });
+
+    if (!DEPLOY_HOOK) {
+        return res.status(400).json({ error: '未配置 ZEABUR_DEPLOY_HOOK 环境变量' });
+    }
+
+    const url = new URL(DEPLOY_HOOK);
+
+    const reqOpt = {
+        hostname: url.hostname,
+        path: url.pathname + url.search,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'Kaggle2API' }
+    };
+
+    const hookReq = https.request(reqOpt, (hookRes) => {
+        let body = '';
+        hookRes.on('data', c => body += c);
+        hookRes.on('end', () => {
+            console.log(`🔄 Deploy hook 已触发，状态: ${hookRes.statusCode}`);
+            res.json({ ok: true, status: hookRes.statusCode, response: body });
+        });
+    });
+
+    hookReq.on('error', (e) => {
+        res.status(500).json({ error: e.message });
+    });
+
+    hookReq.end();
 });
 
 // === 仪表盘 ===
@@ -89,13 +199,25 @@ app.get('/', (req, res) => {
         justify-content: space-between;
     }
 
-    .header h1 {
-        font-size: 20px;
-        font-weight: 600;
-        color: #e6edf3;
+    .header-left { display: flex; align-items: center; gap: 12px; }
+
+    .header h1 { font-size: 20px; font-weight: 600; color: #e6edf3; }
+    .header h1 span { color: #58a6ff; }
+
+    .version-badge {
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 12px;
+        background: #1f2937;
+        border: 1px solid #30363d;
+        color: #8b949e;
     }
 
-    .header h1 span { color: #58a6ff; }
+    .header-right {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+    }
 
     .header-status {
         display: flex;
@@ -161,7 +283,7 @@ app.get('/', (req, res) => {
         margin-bottom: 12px;
     }
 
-    .node-list { display: flex; flex-direction: column; gap: 8px; }
+    .node-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 24px; }
 
     .node-card {
         background: #161b22;
@@ -188,12 +310,7 @@ app.get('/', (req, res) => {
 
     .node-info { flex: 1; min-width: 0; }
 
-    .node-label {
-        font-size: 14px;
-        font-weight: 600;
-        color: #e6edf3;
-        margin-bottom: 2px;
-    }
+    .node-label { font-size: 14px; font-weight: 600; color: #e6edf3; margin-bottom: 2px; }
 
     .node-endpoint {
         font-size: 12px;
@@ -204,35 +321,183 @@ app.get('/', (req, res) => {
         white-space: nowrap;
     }
 
-    .node-metrics {
+    .node-metrics { display: flex; gap: 20px; flex-shrink: 0; }
+
+    .metric { text-align: right; }
+    .metric .num { font-size: 16px; font-weight: 600; color: #e6edf3; }
+    .metric .tag { font-size: 11px; color: #8b949e; }
+
+    .empty-state { text-align: center; padding: 48px; color: #484f58; }
+    .empty-state .icon { font-size: 36px; margin-bottom: 12px; }
+
+    /* === 更新面板 === */
+    .update-panel {
+        background: #161b22;
+        border: 1px solid #21262d;
+        border-radius: 8px;
+        padding: 20px;
+        margin-bottom: 24px;
+    }
+
+    .update-header {
         display: flex;
-        gap: 20px;
-        flex-shrink: 0;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 16px;
     }
 
-    .metric {
-        text-align: right;
+    .update-title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
     }
 
-    .metric .num {
-        font-size: 16px;
+    .update-title h3 {
+        font-size: 15px;
         font-weight: 600;
         color: #e6edf3;
     }
 
-    .metric .tag {
+    .badge {
         font-size: 11px;
+        padding: 2px 10px;
+        border-radius: 12px;
+        font-weight: 600;
+    }
+
+    .badge.latest {
+        background: rgba(63,185,80,0.15);
+        color: #3fb950;
+        border: 1px solid rgba(63,185,80,0.3);
+    }
+
+    .badge.available {
+        background: rgba(210,153,34,0.15);
+        color: #d29922;
+        border: 1px solid rgba(210,153,34,0.3);
+        animation: glow 2s infinite;
+    }
+
+    @keyframes glow {
+        0%, 100% { box-shadow: none; }
+        50% { box-shadow: 0 0 8px rgba(210,153,34,0.3); }
+    }
+
+    .badge.checking {
+        background: rgba(88,166,255,0.15);
+        color: #58a6ff;
+        border: 1px solid rgba(88,166,255,0.3);
+    }
+
+    .badge.error {
+        background: rgba(248,81,73,0.15);
+        color: #f85149;
+        border: 1px solid rgba(248,81,73,0.3);
+    }
+
+    .update-actions { display: flex; gap: 8px; }
+
+    .btn {
+        padding: 6px 16px;
+        border-radius: 6px;
+        border: 1px solid #30363d;
+        background: #21262d;
+        color: #c9d1d9;
+        font-size: 13px;
+        cursor: pointer;
+        transition: all 0.2s;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .btn:hover { background: #30363d; border-color: #484f58; }
+
+    .btn.primary {
+        background: #1f6feb;
+        border-color: #1f6feb;
+        color: #fff;
+    }
+
+    .btn.primary:hover { background: #388bfd; }
+
+    .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    .btn .spinner {
+        width: 12px; height: 12px;
+        border: 2px solid transparent;
+        border-top-color: currentColor;
+        border-radius: 50%;
+        animation: spin 0.6s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .version-info {
+        display: flex;
+        gap: 24px;
+        margin-bottom: 16px;
+    }
+
+    .ver-item { font-size: 13px; color: #8b949e; }
+    .ver-item strong { color: #e6edf3; }
+
+    .changelog-box {
+        background: #0d1117;
+        border: 1px solid #21262d;
+        border-radius: 6px;
+        padding: 16px;
+        max-height: 240px;
+        overflow-y: auto;
+        font-size: 13px;
+        line-height: 1.7;
         color: #8b949e;
+        display: none;
     }
 
-    .empty-state {
-        text-align: center;
-        padding: 48px;
-        color: #484f58;
+    .changelog-box.show { display: block; }
+
+    .changelog-box h2 {
+        font-size: 15px;
+        color: #e6edf3;
+        margin: 12px 0 6px 0;
     }
 
-    .empty-state .icon { font-size: 36px; margin-bottom: 12px; }
-    .empty-state p { font-size: 14px; }
+    .changelog-box h2:first-child { margin-top: 0; }
+
+    .changelog-box h3 {
+        font-size: 13px;
+        color: #d29922;
+        margin: 8px 0 4px 0;
+    }
+
+    .changelog-box ul { padding-left: 20px; }
+    .changelog-box li { margin: 2px 0; }
+
+    .changelog-toggle {
+        font-size: 12px;
+        color: #58a6ff;
+        cursor: pointer;
+        margin-top: 8px;
+        display: inline-block;
+    }
+
+    .changelog-toggle:hover { text-decoration: underline; }
+
+    .update-msg {
+        margin-top: 12px;
+        font-size: 13px;
+        padding: 8px 12px;
+        border-radius: 6px;
+        display: none;
+    }
+
+    .update-msg.info { display: block; background: rgba(88,166,255,0.1); color: #58a6ff; }
+    .update-msg.success { display: block; background: rgba(63,185,80,0.1); color: #3fb950; }
+    .update-msg.err { display: block; background: rgba(248,81,73,0.1); color: #f85149; }
 
     .footer {
         text-align: center;
@@ -247,20 +512,29 @@ app.get('/', (req, res) => {
     @media (max-width: 640px) {
         .stats-grid { grid-template-columns: repeat(2, 1fr); }
         .node-metrics { gap: 12px; }
+        .version-info { flex-direction: column; gap: 4px; }
+        .update-header { flex-direction: column; align-items: flex-start; gap: 12px; }
     }
 </style>
 </head>
 <body>
 
 <div class="header">
-    <h1><span>Kaggle2API</span> Dashboard</h1>
-    <div class="header-status">
-        <div class="pulse"></div>
-        <span id="uptime">--</span>
+    <div class="header-left">
+        <h1><span>Kaggle2API</span> Dashboard</h1>
+        <span class="version-badge" id="header-ver">v${LOCAL_VERSION.version}</span>
+    </div>
+    <div class="header-right">
+        <div class="header-status">
+            <div class="pulse"></div>
+            <span id="uptime">--</span>
+        </div>
     </div>
 </div>
 
 <div class="container">
+
+    <!-- 统计卡片 -->
     <div class="stats-grid">
         <div class="stat-card">
             <div class="label">活跃节点</div>
@@ -280,6 +554,41 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
+    <!-- 更新面板 -->
+    <div class="section-title">版本管理</div>
+    <div class="update-panel">
+        <div class="update-header">
+            <div class="update-title">
+                <h3>🔧 系统更新</h3>
+                <span class="badge checking" id="update-badge">检查中...</span>
+            </div>
+            <div class="update-actions">
+                <button class="btn" id="btn-check" onclick="checkUpdate()">
+                    🔍 检查更新
+                </button>
+                <button class="btn primary" id="btn-update" style="display:none" onclick="doUpdate()">
+                    🚀 立即更新
+                </button>
+            </div>
+        </div>
+
+        <div class="version-info">
+            <div class="ver-item">当前版本: <strong id="ver-current">v${LOCAL_VERSION.version}</strong></div>
+            <div class="ver-item">发布日期: <strong id="ver-current-date">${LOCAL_VERSION.date}</strong></div>
+            <div class="ver-item" id="ver-remote-wrap" style="display:none">
+                最新版本: <strong id="ver-remote">--</strong>
+            </div>
+        </div>
+
+        <span class="changelog-toggle" id="cl-toggle" style="display:none" onclick="toggleChangelog()">
+            📋 查看更新日志
+        </span>
+        <div class="changelog-box" id="changelog"></div>
+
+        <div class="update-msg" id="update-msg"></div>
+    </div>
+
+    <!-- 节点列表 -->
     <div class="section-title">节点列表</div>
     <div class="node-list" id="node-list">
         <div class="empty-state">
@@ -287,14 +596,17 @@ app.get('/', (req, res) => {
             <p>等待 Kaggle 节点注册...</p>
         </div>
     </div>
+
 </div>
 
 <div class="footer">
-    <a href="https://github.com/Akatsuki03/Kaggle2API-via-Zeabur" target="_blank">GitHub</a>
+    <a href="https://github.com/${REPO}" target="_blank">GitHub</a>
     &nbsp;·&nbsp; 每 3 秒自动刷新
 </div>
 
 <script>
+const REGISTRY_TOKEN = ''; // 留空，更新时会弹窗输入
+
 function formatUptime(sec) {
     const h = Math.floor(sec / 3600);
     const m = Math.floor((sec % 3600) / 60);
@@ -319,6 +631,7 @@ function nodeStatus(lastSeen) {
     return 'dead';
 }
 
+// === 状态刷新 ===
 async function refresh() {
     try {
         const res = await fetch('/status');
@@ -334,7 +647,6 @@ async function refresh() {
         document.getElementById('s-rate').textContent = rate;
 
         const list = document.getElementById('node-list');
-
         if (d.nodes.length === 0) {
             list.innerHTML = '<div class="empty-state"><div class="icon">📡</div><p>等待 Kaggle 节点注册...</p></div>';
             return;
@@ -357,8 +669,115 @@ async function refresh() {
     } catch(e) {}
 }
 
+// === 检查更新 ===
+async function checkUpdate() {
+    const badge = document.getElementById('update-badge');
+    const btn = document.getElementById('btn-check');
+    const btnUpdate = document.getElementById('btn-update');
+    const msg = document.getElementById('update-msg');
+
+    badge.className = 'badge checking';
+    badge.textContent = '检查中...';
+    btn.disabled = true;
+    btn.innerHTML = '<div class="spinner"></div> 检查中';
+    btnUpdate.style.display = 'none';
+    msg.className = 'update-msg';
+
+    try {
+        const res = await fetch('/api/check-update');
+        const d = await res.json();
+
+        if (d.error) throw new Error(d.error);
+
+        document.getElementById('ver-current').textContent = 'v' + d.current;
+        document.getElementById('ver-current-date').textContent = d.currentDate;
+
+        if (d.hasUpdate) {
+            badge.className = 'badge available';
+            badge.textContent = 'v' + d.remote + ' 可用';
+            document.getElementById('ver-remote-wrap').style.display = '';
+            document.getElementById('ver-remote').textContent = 'v' + d.remote + ' (' + d.remoteDate + ')';
+            btnUpdate.style.display = '';
+
+            if (!d.deployHookConfigured) {
+                msg.className = 'update-msg err';
+                msg.textContent = '⚠️ 未配置 ZEABUR_DEPLOY_HOOK 环境变量，无法自动更新。请在 Zeabur 控制台 Settings → Deploy Hook 中获取链接，添加到环境变量。';
+            }
+        } else {
+            badge.className = 'badge latest';
+            badge.textContent = '已是最新';
+        }
+
+        if (d.changelog) {
+            document.getElementById('cl-toggle').style.display = '';
+            document.getElementById('changelog').innerHTML = simpleMarkdown(d.changelog);
+        }
+    } catch(e) {
+        badge.className = 'badge error';
+        badge.textContent = '检查失败';
+        msg.className = 'update-msg err';
+        msg.textContent = '❌ ' + e.message;
+    }
+
+    btn.disabled = false;
+    btn.innerHTML = '🔍 检查更新';
+}
+
+// === 执行更新 ===
+async function doUpdate() {
+    const token = prompt('输入管理密钥 (REGISTRY_TOKEN):');
+    if (!token) return;
+
+    const btn = document.getElementById('btn-update');
+    const msg = document.getElementById('update-msg');
+
+    btn.disabled = true;
+    btn.innerHTML = '<div class="spinner"></div> 部署中...';
+
+    try {
+        const res = await fetch('/api/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token })
+        });
+        const d = await res.json();
+
+        if (d.error) throw new Error(d.error);
+
+        msg.className = 'update-msg success';
+        msg.textContent = '✅ 部署已触发！Zeabur 正在重新构建，页面将在约 30 秒后自动刷新...';
+
+        setTimeout(() => location.reload(), 30000);
+    } catch(e) {
+        msg.className = 'update-msg err';
+        msg.textContent = '❌ ' + e.message;
+        btn.disabled = false;
+        btn.innerHTML = '🚀 立即更新';
+    }
+}
+
+// === Markdown 简易渲染 ===
+function simpleMarkdown(md) {
+    return md
+        .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+        .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+        .replace(/^# (.+)$/gm, '<h2>$1</h2>')
+        .replace(/^- (.+)$/gm, '<li>$1</li>')
+        .replace(/(<li>.*<\\/li>)/s, '<ul>$1</ul>')
+        .replace(/\\n/g, '<br>');
+}
+
+function toggleChangelog() {
+    const box = document.getElementById('changelog');
+    box.classList.toggle('show');
+    const toggle = document.getElementById('cl-toggle');
+    toggle.textContent = box.classList.contains('show') ? '📋 收起更新日志' : '📋 查看更新日志';
+}
+
+// === 启动 ===
 refresh();
 setInterval(refresh, 3000);
+setTimeout(checkUpdate, 1000);
 </script>
 </body>
 </html>`);
@@ -394,5 +813,5 @@ app.use('/v1', (req, res) => {
 });
 
 app.listen(process.env.PORT || 3000, () => {
-    console.log('🚀 Kaggle2API Gateway 已启动');
+    console.log('🚀 Kaggle2API Gateway v' + LOCAL_VERSION.version + ' 已启动');
 });
