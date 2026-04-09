@@ -115,7 +115,6 @@ app.get('/api/check-update', async (req, res) => {
         try {
              remoteVersion = JSON.parse(remoteVersionStr);
         } catch(e) {
-             console.error("解析版本文件失败:", remoteVersionStr);
              throw new Error("远程版本文件格式错误");
         }
 
@@ -209,7 +208,7 @@ app.use('/v1', (req, res) => {
     })(req, res, () => {});
 });
 
-// === 仪表盘 GUI ===
+// === 仪表盘 GUI (包含正确的字符串拼接) ===
 app.get('/', (req, res) => {
     res.send(`<!DOCTYPE html>
 <html lang="zh">
@@ -415,7 +414,10 @@ async function checkUpdate() {
 
         if (d.changelog) {
             document.getElementById('cl-toggle').style.display = '';
-            document.getElementById('changelog').innerHTML = simpleMarkdown(d.changelog);
+            // 修复可能出现的正则转义问题
+            let out = d.changelog.replace(/^### (.+)$/gm, '<h3>$1</h3>').replace(/^## (.+)$/gm, '<h2>$1</h2>').replace(/^# (.+)$/gm, '<h2>$1</h2>').replace(/^- (.+)$/gm, '<li>$1</li>');
+            out = out.split('\\n').join('<br>').split('\\r').join('');
+            document.getElementById('changelog').innerHTML = out;
         }
     } catch(e) {
         badge.className = 'badge error'; badge.textContent = '检查失败';
@@ -439,10 +441,6 @@ async function doUpdate() {
         msg.className = 'update-msg err'; msg.textContent = '❌ ' + e.message;
         btn.disabled = false; btn.innerHTML = '🚀 立即更新';
     }
-}
-
-function simpleMarkdown(md) {
-    return md.replace(/^### (.+)$/gm, '<h3>$1</h3>').replace(/^## (.+)$/gm, '<h2>$1</h2>').replace(/^# (.+)$/gm, '<h2>$1</h2>').replace(/^- (.+)$/gm, '<li>$1</li>').replace(/(<li>.*<\\/li>)/s, '<ul>$1</ul>').replace(/\\n/g, '<br>');
 }
 
 function toggleChangelog() {
