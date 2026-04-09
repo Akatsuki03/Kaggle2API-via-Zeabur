@@ -676,61 +676,63 @@ async function refresh() {
 }
 
 // === 检查更新 ===
-async function checkUpdate() {
-    const badge = document.getElementById('update-badge');
-    const btn = document.getElementById('btn-check');
-    const btnUpdate = document.getElementById('btn-update');
-    const msg = document.getElementById('update-msg');
-
-    badge.className = 'badge checking';
-    badge.textContent = '检查中...';
-    btn.disabled = true;
-    btn.innerHTML = '<div class="spinner"></div> 检查中';
-    btnUpdate.style.display = 'none';
-    msg.className = 'update-msg';
-
+app.get('/api/check-update', async (req, res) => {
     try {
-        const res = await fetch('/api/check-update');
-        const d = await res.json();
-
-        if (d.error) throw new Error(d.error);
-
-        document.getElementById('ver-current').textContent = 'v' + d.current;
-        document.getElementById('ver-current-date').textContent = d.currentDate;
-
-        if (d.hasUpdate) {
-            badge.className = 'badge available';
-            badge.textContent = 'v' + d.remote + ' 可用';
-            document.getElementById('ver-remote-wrap').style.display = '';
-            document.getElementById('ver-remote').textContent = 'v' + d.remote + ' (' + d.remoteDate + ')';
-            
-            if (!d.deployHookConfigured) {
-                // 改成蓝色提示，并把没用的更新按钮隐藏起来，因为 GitHub 会自动搞定！
-                btnUpdate.style.display = 'none';
-                msg.className = 'update-msg info';
-                msg.textContent = '💡 提示：Zeabur 正在监听 GitHub 仓库。如果是 Fork 的项目，请在 GitHub 点击 "Sync fork" 拉取最新代码，Zeabur 将会自动部署更新。';
-            } else {
-                btnUpdate.style.display = '';
-            }
-        } else {
-            badge.className = 'badge latest';
-            badge.textContent = '已是最新';
+        const now = Date.now();
+        if (updateCache.data && (now - updateCache.checkedAt) < 60000) {
+            return res.json(updateCache.data);
         }
 
-        if (d.changelog) {
-            document.getElementById('cl-toggle').style.display = '';
-            document.getElementById('changelog').innerHTML = simpleMarkdown(d.changelog);
+        // 使用 github api 获取，或者用 githubusercontent 加版本号防止缓存
+        const versionUrl = `https://raw.githubusercontent.com/${REPO}/main/gateway/version.json?t=${now}`;
+        const changelogUrl = `https://raw.githubusercontent.com/${REPO}/main/CHANGELOG.md?t=${now}`;
+
+        let remoteVersionStr = '';
+        try {
+             remoteVersionStr = await fetchText(versionUrl);
+        } catch(e) {
+             throw new Error("无法连接到 Github 仓库获取版本信息。");
         }
+        
+        if (!remoteVersionStr || remoteVersionStr.includes("404: Not Found")) {
+             throw new Error("未在远程仓库找到 version.json，可能刚推送，请稍后刷新。");
+        }
+
+        let remoteVersion;
+        try {
+             remoteVersion = JSON.parse(remoteVersionStr);
+        } catch(e) {
+             console.error("解析版本文件失败:", remoteVersionStr);
+             throw new Error("远程版本文件格式错误。");
+        }
+
+        let changelog = '';
+        try {
+            changelog = await fetchText(changelogUrl);
+            if(changelog.includes("404: Not Found")) changelog = '';
+        } catch(e) {
+             changelog = ''; // 没获取到日志就算了
+        }
+
+        const hasUpdate = compareVersion(remoteVersion.version, LOCAL_VERSION.version) > 0;
+
+        const result = {
+            current: LOCAL_VERSION.version,
+            currentDate: LOCAL_VERSION.date,
+            remote: remoteVersion.version,
+            remoteDate: remoteVersion.date,
+            hasUpdate,
+            changelog,
+            deployHookConfigured: !!DEPLOY_HOOK
+        };
+
+        updateCache = { data: result, checkedAt: now };
+        res.json(result);
     } catch(e) {
-        badge.className = 'badge error';
-        badge.textContent = '检查失败';
-        msg.className = 'update-msg err';
-        msg.textContent = '❌ ' + e.message;
+        console.error("更新检查错误:", e);
+        res.status(500).json({ error: e.message });
     }
-
-    btn.disabled = false;
-    btn.innerHTML = '🔍 检查更新';
-}
+});
 
 // === 执行更新 ===
 async function doUpdate() {
