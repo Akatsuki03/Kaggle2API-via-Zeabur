@@ -97,7 +97,7 @@ app.get('/api/check-update', async (req, res) => {
             return res.json(updateCache.data);
         }
 
-        const versionUrl = `https://raw.githubusercontent.com/${REPO}/main/gateway/version.json?t=${now}`;
+        const versionUrl = `https://raw.githubusercontent.com/${REPO}/main/version.json?t=${now}`;
         const changelogUrl = `https://raw.githubusercontent.com/${REPO}/main/CHANGELOG.md?t=${now}`;
 
         let remoteVersionStr = '';
