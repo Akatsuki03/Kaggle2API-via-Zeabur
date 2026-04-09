@@ -1,7 +1,11 @@
-// package.json
 {
-  "name": "kaggle-gateway",
-  "scripts": { "start": "node server.js" },
+  "name": "kaggle2api-gateway",
+  "version": "1.0.0",
+  "description": "Fixed endpoint gateway for Kaggle AI quota",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
     "express": "^4.18.0",
     "http-proxy-middleware": "^3.0.0"
